@@ -26,6 +26,14 @@ jobs:
         with:
           gradle-version: '8.4'
 
+      - name: Download libv2ray.aar from AndroidLibXrayLite's GitHub Release
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: '2dust/AndroidLibXrayLite'
+          latest: true
+          fileName: 'libv2ray.aar'
+          out-file-path: 'app/libs'
+
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 
