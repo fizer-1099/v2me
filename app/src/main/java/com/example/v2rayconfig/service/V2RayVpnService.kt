@@ -26,38 +26,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
-/**
- * Establishes the local VPN interface and routes its traffic into the
- * Xray-core engine via AndroidLibXrayLite's CoreController — the current
- * (as of Aug 2026) API for this library. Also owns continuous health
- * monitoring + automatic failover: if the active server stops responding,
- * this service picks the next best reachable one and switches the running
- * engine over to it WITHOUT tearing down the TUN interface, so there's no
- * VPN-permission prompt and no visible drop for apps using the tunnel.
- *
- * ARCHITECTURE NOTE (verified against live docs, Aug 2026): the library's
- * public API changed from the older V2RayPoint/configureFileContent/
- * runLoop/V2RayVPNServiceSupportsSet(protect/setup) shape to:
- *   CoreController.startLoop(configJson, tunFd): Int32 fd passed directly
- *   CoreController.stopLoop()
- *   CoreCallbackHandler { startup(), shutdown(), onEmitStatus() }  — NOTE:
- *     no protect() callback exists anymore. Since the Go core's own
- *     outbound socket (to your real proxy server) runs in this app's
- *     process, it would otherwise get captured by our own 0.0.0.0/0 route
- *     and loop back into itself. We prevent that the same way modern
- *     Xray-core Android integration expects: excluding this app's own
- *     package from the VPN via Builder.addDisallowedApplication(), so any
- *     socket this process opens (including the native core's) bypasses
- *     the tunnel automatically — no per-socket protect() needed.
- *   The Xray JSON config itself must declare a "tun" protocol inbound
- *     (port/listen are ignored for it) for Xray to actually attach to the
- *     fd — see ServerConfig.kt's buildRootConfig.
- *
- * If a future library version changes this again, the methods below
- * (startLoop/stopLoop/startup/shutdown/onEmitStatus) are the places to
- * update — check https://github.com/2dust/AndroidLibXrayLite before
- * assuming this still matches.
- */
 class V2RayVpnService : VpnService(), CoreCallbackHandler {
 
     companion object {
@@ -71,13 +39,13 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         const val ACTION_ACTIVE_CONFIG_CHANGED = "com.example.v2rayconfig.ACTIVE_CONFIG_CHANGED"
         const val EXTRA_NEW_CONFIG_ID = "new_config_id"
         const val EXTRA_NEW_CONFIG_REMARK = "new_config_remark"
-        const val EXTRA_REASON = "reason" // "manual" or "failover"
+        const val EXTRA_REASON = "reason"
 
-        private const val LOCAL_PORT = 10808 // the diagnostics-only socks-in from ServerConfig.kt
+        private const val LOCAL_PORT = 10808
         private const val HEALTH_CHECK_INTERVAL_SEC = 20L
         private const val HEALTH_CHECK_TIMEOUT_MS = 6000
         private const val MAX_CONSECUTIVE_FAILURES = 2
-        private const val FAILOVER_COOLDOWN_MS = 5 * 60 * 1000L // don't retry a just-failed server for 5 min
+        private const val FAILOVER_COOLDOWN_MS = 5 * 60 * 1000L
         private const val HEALTH_CHECK_URL = "https://cp.cloudflare.com/generate_204"
 
         var isRunning = false
@@ -112,8 +80,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         return START_STICKY
     }
 
-    // ---------- Start / stop / switch ----------
-
     private fun startVpn(configJson: String, configId: String?) {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
@@ -125,14 +91,9 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
             .addRoute("0.0.0.0", 0)
             .setMtu(1500)
 
-        // Critical: exclude THIS app from the tunnel, or Xray's own
-        // outbound connection to your proxy server (opened from inside
-        // this same process) gets captured by our own 0.0.0.0/0 route and
-        // loops back into itself instead of reaching the real internet.
         try {
             builder.addDisallowedApplication(packageName)
         } catch (e: Exception) {
-            // Shouldn't happen for our own package, but don't hard-fail startup over it.
         }
 
         vpnInterface = builder.establish()
@@ -158,7 +119,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         startHealthMonitor()
     }
 
-    /** Switches the running engine to a different config's JSON, reusing the same TUN fd. */
     private fun restartEngine(configJson: String): Boolean {
         val tunFd = vpnInterface?.fd ?: return false
         return try {
@@ -173,7 +133,7 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
 
     private fun stopVpn() {
         stopHealthMonitor()
-        try { coreController?.stopLoop() } catch (e: Exception) { /* best effort */ }
+        try { coreController?.stopLoop() } catch (e: Exception) { }
         coreController = null
         vpnInterface?.close()
         vpnInterface = null
@@ -183,8 +143,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         stopForeground(true)
         stopSelf()
     }
-
-    // ---------- Health monitoring + automatic failover ----------
 
     private fun startHealthMonitor() {
         stopHealthMonitor()
@@ -201,7 +159,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         monitorExecutor = null
     }
 
-    /** Runs on the monitor's background thread. */
     private fun runHealthCheck() {
         if (!isRunning) return
         val healthy = checkHealthOnce()
@@ -217,7 +174,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         }
     }
 
-    /** Goes through the app's own diagnostics socks-in (see ServerConfig.kt), not the TUN itself. */
     private fun checkHealthOnce(): Boolean {
         return try {
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", LOCAL_PORT))
@@ -233,7 +189,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         }
     }
 
-    /** Picks the next best reachable server (excluding ones in cooldown) and switches over in-place. */
     private fun attemptFailover() {
         val failedId = activeConfigId
         if (failedId != null) repo.markConfigFailed(failedId)
@@ -254,7 +209,6 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         switchTo(best, reason = "failover")
     }
 
-    /** Switches the running engine to a different config without tearing down the TUN interface. */
     private fun switchTo(config: ServerConfig, reason: String) {
         val ok = restartEngine(config.xrayConfigJson)
         if (!ok) {
@@ -276,24 +230,18 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
-    // --- CoreCallbackHandler: callbacks the Go core uses to talk back to us ---
-    // (No protect()/setup() here anymore — see the class-level ARCHITECTURE NOTE.)
+    override fun startup(): Long = 0
 
-    override fun startup(): long = 0
-
-    /** Called if the core shuts itself down unexpectedly (e.g. fatal error) — not on our own stopLoop() calls. */
-    override fun shutdown(): long {
+    override fun shutdown(): Long {
         if (isRunning) {
             mainThreadHandler().post { updateNotification("Core stopped unexpectedly") }
         }
         return 0
     }
 
-    override fun onEmitStatus(code: long, message: String?): long = 0
+    override fun onEmitStatus(code: Long, message: String?): Long = 0
 
     private fun mainThreadHandler() = android.os.Handler(android.os.Looper.getMainLooper())
-
-    // ---------- Notification ----------
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
