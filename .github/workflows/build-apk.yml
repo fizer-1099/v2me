@@ -1,0 +1,43 @@
+name: Build debug APK
+
+# Builds an installable .apk on GitHub's own servers every time you push,
+# or whenever you trigger it manually from the Actions tab. This exists
+# because the environment that generated this project has no Android SDK
+# and no internet access, so it could only produce source code — this
+# workflow is what actually turns that source into something installable,
+# using GitHub's (not your) infrastructure.
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        # No gradlew wrapper is bundled with this project (the environment
+        # that generated it had no internet to fetch the wrapper jar), so
+        # this uses the Gradle that setup-gradle just installed instead.
+        run: gradle assembleDebug --stacktrace
+
+      - name: Upload APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2ray-config-app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
