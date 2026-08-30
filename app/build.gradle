@@ -46,13 +46,13 @@ dependencies {
 
     // Core tunneling engine (wraps Xray-core for Android).
     // Source: https://github.com/2dust/AndroidLibXrayLite
-    // API verified live Aug 2026: exposes NewCoreController(CoreCallbackHandler)
-    // -> CoreController.startLoop(configJson, tunFd) / stopLoop() / measureDelay(url),
-    // plus a package-level Libv2ray.measureOutboundDelay(configJson, url).
-    // You must build/publish this locally or point to a valid AAR;
-    // JitPack coordinates below are a placeholder — check the repo's
-    // README for the current recommended way to consume it.
-    implementation 'com.github.2dust:AndroidLibXrayLite:main-SNAPSHOT'
+    // Pinned to a real, immutable release tag instead of "main-SNAPSHOT" —
+    // a floating/dynamic version was the actual cause of the "Cannot mutate
+    // the dependencies of configuration ... after the configuration was
+    // resolved" build failure. If this tag is old by the time you read
+    // this, check https://github.com/2dust/AndroidLibXrayLite/releases
+    // for the current latest tag and swap it in below.
+    implementation 'com.github.2dust:AndroidLibXrayLite:v26.5.9'
 
     implementation 'com.google.code.gson:gson:2.10.1'
 }
