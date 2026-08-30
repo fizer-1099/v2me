@@ -279,17 +279,17 @@ class V2RayVpnService : VpnService(), CoreCallbackHandler {
     // --- CoreCallbackHandler: callbacks the Go core uses to talk back to us ---
     // (No protect()/setup() here anymore — see the class-level ARCHITECTURE NOTE.)
 
-    override fun startup(): Int = 0
+    override fun startup(): long = 0
 
     /** Called if the core shuts itself down unexpectedly (e.g. fatal error) — not on our own stopLoop() calls. */
-    override fun shutdown(): Int {
+    override fun shutdown(): long {
         if (isRunning) {
             mainThreadHandler().post { updateNotification("Core stopped unexpectedly") }
         }
         return 0
     }
 
-    override fun onEmitStatus(code: Int, message: String?): Int = 0
+    override fun onEmitStatus(code: long, message: String?): long = 0
 
     private fun mainThreadHandler() = android.os.Handler(android.os.Looper.getMainLooper())
 
