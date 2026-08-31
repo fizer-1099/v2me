@@ -4,24 +4,22 @@ import android.content.Context
 import com.example.v2rayconfig.model.ServerConfig
 import com.example.v2rayconfig.model.TargetApp
 import libv2ray.Libv2ray
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
-/**
- * Tests every saved server against a list of specific filtered
- * sites/apps and reports latency per (server, app) pair, so the app can
- * recommend "for Claude, server X in country Y works best" instead of a
- * single generic ranking.
- *
- * As of the current AndroidLibXrayLite API (verified Aug 2026), the
- * library exposes a purpose-built Libv2ray.measureOutboundDelay(configJson,
- * url) function that spins up the given config's outbound just long enough
- * to time a request to url — no TUN, no manual local-proxy juggling
- * required on our side. This replaced an earlier, much more roundabout
- * implementation of ours that manually started a whole separate engine
- * instance per test.
- */
 object SmartAppTester {
 
-    /** appId -> latencyMs (-1 = failed/unreachable) */
+    /**
+     * Hard cap per (server, site) test. measureOutboundDelay is a native
+     * blocking call with no timeout of its own — without this, a single
+     * unresponsive server could hang the entire Smart Test indefinitely
+     * (this was a real bug: the progress dialog would never dismiss).
+     */
+    private const val PER_TEST_TIMEOUT_SEC = 12L
+
+    private val timeoutExecutor = Executors.newSingleThreadExecutor()
+
     fun testConfigAgainstApps(context: Context, config: ServerConfig, apps: List<TargetApp>): Map<String, Long> {
         XrayEnv.ensureInitialized(context)
         return apps.associate { app ->
@@ -30,14 +28,23 @@ object SmartAppTester {
     }
 
     private fun measureOne(config: ServerConfig, url: String): Long {
+        val future = timeoutExecutor.submit<Long> {
+            try {
+                Libv2ray.measureOutboundDelay(config.xrayConfigJson, url)
+            } catch (e: Exception) {
+                -1L
+            }
+        }
         return try {
-            Libv2ray.measureOutboundDelay(config.xrayConfigJson, url)
+            future.get(PER_TEST_TIMEOUT_SEC, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true)
+            -1L
         } catch (e: Exception) {
             -1L
         }
     }
 
-    /** Runs testConfigAgainstApps sequentially over every config. configId -> (appId -> latencyMs) */
     fun testAllConfigs(
         context: Context,
         configs: List<ServerConfig>,
@@ -52,7 +59,6 @@ object SmartAppTester {
         return all
     }
 
-    /** For each app, the config with the lowest latency across all tested configs. */
     fun bestConfigPerApp(
         configs: List<ServerConfig>,
         apps: List<TargetApp>,
