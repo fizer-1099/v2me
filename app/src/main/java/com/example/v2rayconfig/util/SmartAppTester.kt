@@ -4,31 +4,23 @@ import android.content.Context
 import com.example.v2rayconfig.model.ServerConfig
 import com.example.v2rayconfig.model.TargetApp
 import libv2ray.Libv2ray
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 
 object SmartAppTester {
 
-    /**
-     * Hard cap per (server, site) test. measureOutboundDelay is a native
-     * blocking call with no timeout of its own — without this, a single
-     * unresponsive server could hang the entire Smart Test indefinitely
-     * (this was a real bug: the progress dialog would never dismiss).
-     */
-    private const val PER_TEST_TIMEOUT_SEC = 12L
+    private const val PER_TEST_TIMEOUT_SEC = 8L
+    private const val MAX_PARALLEL_TESTS = 5
 
-    private val timeoutExecutor = Executors.newSingleThreadExecutor()
+    private val nativeCallExecutor = Executors.newCachedThreadPool()
 
-    fun testConfigAgainstApps(context: Context, config: ServerConfig, apps: List<TargetApp>): Map<String, Long> {
-        XrayEnv.ensureInitialized(context)
-        return apps.associate { app ->
-            app.id to measureOne(config, app.testUrl)
-        }
-    }
+    private data class TestPair(val config: ServerConfig, val app: TargetApp)
 
     private fun measureOne(config: ServerConfig, url: String): Long {
-        val future = timeoutExecutor.submit<Long> {
+        val future = nativeCallExecutor.submit<Long> {
             try {
                 Libv2ray.measureOutboundDelay(config.xrayConfigJson, url)
             } catch (e: Exception) {
@@ -49,14 +41,36 @@ object SmartAppTester {
         context: Context,
         configs: List<ServerConfig>,
         apps: List<TargetApp>,
-        onProgress: (configIndex: Int, total: Int) -> Unit = { _, _ -> }
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
     ): Map<String, Map<String, Long>> {
-        val all = mutableMapOf<String, Map<String, Long>>()
-        configs.forEachIndexed { index, config ->
-            onProgress(index + 1, configs.size)
-            all[config.id] = testConfigAgainstApps(context, config, apps)
+        XrayEnv.ensureInitialized(context)
+
+        val allPairs = configs.flatMap { c -> apps.map { a -> TestPair(c, a) } }
+        val total = allPairs.size
+        if (total == 0) return emptyMap()
+
+        val doneCount = AtomicInteger(0)
+        val resultsByPair = ConcurrentHashMap<TestPair, Long>()
+        val pool = Executors.newFixedThreadPool(MAX_PARALLEL_TESTS)
+
+        try {
+            val futures = allPairs.map { pair ->
+                pool.submit {
+                    resultsByPair[pair] = measureOne(pair.config, pair.app.testUrl)
+                    onProgress(doneCount.incrementAndGet(), total)
+                }
+            }
+            futures.forEach { it.get() }
+        } finally {
+            pool.shutdown()
         }
-        return all
+
+        val grouped = mutableMapOf<String, MutableMap<String, Long>>()
+        allPairs.forEach { pair ->
+            val latency = resultsByPair[pair] ?: -1L
+            grouped.getOrPut(pair.config.id) { mutableMapOf() }[pair.app.id] = latency
+        }
+        return grouped
     }
 
     fun bestConfigPerApp(
