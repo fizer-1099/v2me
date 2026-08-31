@@ -132,22 +132,30 @@ class MainActivity : AppCompatActivity() {
         if (userInitiated) Toast.makeText(this, "Testing ${all.size} server(s)...", Toast.LENGTH_SHORT).show()
 
         bgExecutor.submit {
-            val results = PingTester.testAll(this, all)
-            mainHandler.post {
-                latencies = results
-                refreshList()
+            try {
+                val results = PingTester.testAll(this, all)
+                mainHandler.post {
+                    latencies = results
+                    refreshList()
 
-                val reachableCount = results.values.count { it >= 0 }
-                if (userInitiated) {
-                    Toast.makeText(this, "$reachableCount / ${all.size} servers reachable", Toast.LENGTH_SHORT).show()
+                    val reachableCount = results.values.count { it >= 0 }
+                    if (userInitiated) {
+                        Toast.makeText(this, "$reachableCount / ${all.size} servers reachable", Toast.LENGTH_SHORT).show()
+                    }
+
+                    if (repo.isAutoConnectEnabled()) {
+                        val best = FailoverSelector.pickBestCandidate(this, all, repo, precomputedLatencies = results)
+                        if (best != null && best.id != repo.getActiveId()) {
+                            connect(best)
+                        } else if (best == null && userInitiated) {
+                            Toast.makeText(this, "No reachable server found.", Toast.LENGTH_LONG).show()
+                        }
+                    }
                 }
-
-                if (repo.isAutoConnectEnabled()) {
-                    val best = FailoverSelector.pickBestCandidate(this, all, repo, precomputedLatencies = results)
-                    if (best != null && best.id != repo.getActiveId()) {
-                        connect(best)
-                    } else if (best == null && userInitiated) {
-                        Toast.makeText(this, "No reachable server found.", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                mainHandler.post {
+                    if (userInitiated) {
+                        Toast.makeText(this, "Ping test failed: ${e.message}", Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -171,28 +179,40 @@ class MainActivity : AppCompatActivity() {
         val progressDialog = AlertDialog.Builder(this)
             .setTitle("Smart testing...")
             .setMessage("Starting...")
-            .setCancelable(false)
+            .setCancelable(true) // safety net: with per-test timeouts now in place this shouldn't hang, but let the user escape either way
+            .setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
             .create()
         progressDialog.show()
 
         bgExecutor.submit {
-            val results = SmartAppTester.testAllConfigs(this, configs, apps) { index, total ->
-                mainHandler.post {
-                    progressDialog.setMessage("Testing server $index of $total (this can take a few minutes)...")
+            try {
+                val results = SmartAppTester.testAllConfigs(this, configs, apps) { index, total ->
+                    mainHandler.post {
+                        progressDialog.setMessage("Testing server $index of $total (this can take a few minutes)...")
+                    }
                 }
-            }
-            val best = SmartAppTester.bestConfigPerApp(configs, apps, results)
-            repo.saveSmartTestResults(results)
+                val best = SmartAppTester.bestConfigPerApp(configs, apps, results)
+                repo.saveSmartTestResults(results)
 
-            mainHandler.post {
-                progressDialog.dismiss()
-                showSmartTestResults(apps, best)
+                mainHandler.post {
+                    progressDialog.dismiss()
+                    showSmartTestResults(configs, apps, results, best)
+                }
+            } catch (e: Exception) {
+                // Whatever went wrong (engine init failure, unexpected native
+                // exception, etc.) — never leave the dialog stuck on screen.
+                mainHandler.post {
+                    progressDialog.dismiss()
+                    Toast.makeText(this, "Smart test failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }
 
     private fun showSmartTestResults(
+        configs: List<ServerConfig>,
         apps: List<com.example.v2rayconfig.model.TargetApp>,
+        results: Map<String, Map<String, Long>>,
         best: Map<String, Pair<ServerConfig, Long>?>
     ) {
         val container = android.widget.LinearLayout(this).apply {
@@ -221,22 +241,45 @@ class MainActivity : AppCompatActivity() {
             val label = if (result == null) {
                 "${app.displayName}: no working server found"
             } else {
-                "${app.displayName}: ${result.first.remark} (${result.second}ms)"
+                "${app.displayName} — best: ${result.first.remark} (${result.second}ms)"
             }
             val radio = android.widget.RadioButton(this).apply {
                 id = android.view.View.generateViewId()
                 text = label
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
                 isChecked = app.id == currentPriority
             }
             idByViewId[radio.id] = app.id
             radioGroup.addView(radio)
+
+            // Full per-server breakdown for this app, fastest first, so the
+            // person can see every server's speed, not just the winner.
+            val ranked = configs
+                .map { c -> c to (results[c.id]?.get(app.id) ?: -1L) }
+                .sortedWith(compareBy { (_, latency) -> if (latency < 0) Long.MAX_VALUE else latency })
+
+            ranked.forEach { (config, latency) ->
+                val line = android.widget.TextView(this).apply {
+                    text = if (latency >= 0) {
+                        "   • ${config.remark} — ${latency}ms"
+                    } else {
+                        "   • ${config.remark} — timed out / unreachable"
+                    }
+                    setPadding(32, 4, 0, 4)
+                    if (latency < 0) setTextColor(0xFF999999.toInt())
+                }
+                radioGroup.addView(line)
+            }
+
+            val spacer = android.widget.TextView(this).apply { text = ""; setPadding(0, 4, 0, 4) }
+            radioGroup.addView(spacer)
         }
         container.addView(radioGroup)
 
         val scroll = android.widget.ScrollView(this).apply { addView(container) }
 
         AlertDialog.Builder(this)
-            .setTitle("Best server per app")
+            .setTitle("Speed per app, per server")
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 val checkedId = radioGroup.checkedRadioButtonId
