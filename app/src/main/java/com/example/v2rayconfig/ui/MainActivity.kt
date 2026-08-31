@@ -179,16 +179,16 @@ class MainActivity : AppCompatActivity() {
         val progressDialog = AlertDialog.Builder(this)
             .setTitle("Smart testing...")
             .setMessage("Starting...")
-            .setCancelable(true) // safety net: with per-test timeouts now in place this shouldn't hang, but let the user escape either way
+            .setCancelable(true)
             .setNegativeButton("Cancel") { dialog, _ -> dialog.dismiss() }
             .create()
         progressDialog.show()
 
         bgExecutor.submit {
             try {
-                val results = SmartAppTester.testAllConfigs(this, configs, apps) { index, total ->
+                val results = SmartAppTester.testAllConfigs(this, configs, apps) { done, total ->
                     mainHandler.post {
-                        progressDialog.setMessage("Testing server $index of $total (this can take a few minutes)...")
+                        progressDialog.setMessage("Testing... $done / $total checks done (${configs.size} servers × ${apps.size} apps)")
                     }
                 }
                 val best = SmartAppTester.bestConfigPerApp(configs, apps, results)
@@ -199,8 +199,6 @@ class MainActivity : AppCompatActivity() {
                     showSmartTestResults(configs, apps, results, best)
                 }
             } catch (e: Exception) {
-                // Whatever went wrong (engine init failure, unexpected native
-                // exception, etc.) — never leave the dialog stuck on screen.
                 mainHandler.post {
                     progressDialog.dismiss()
                     Toast.makeText(this, "Smart test failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -252,8 +250,6 @@ class MainActivity : AppCompatActivity() {
             idByViewId[radio.id] = app.id
             radioGroup.addView(radio)
 
-            // Full per-server breakdown for this app, fastest first, so the
-            // person can see every server's speed, not just the winner.
             val ranked = configs
                 .map { c -> c to (results[c.id]?.get(app.id) ?: -1L) }
                 .sortedWith(compareBy { (_, latency) -> if (latency < 0) Long.MAX_VALUE else latency })
@@ -283,7 +279,7 @@ class MainActivity : AppCompatActivity() {
             .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
                 val checkedId = radioGroup.checkedRadioButtonId
-                val newPriority = idByViewId[checkedId] // null if "None" was checked
+                val newPriority = idByViewId[checkedId]
                 repo.setPriorityAppId(newPriority)
                 val name = apps.find { it.id == newPriority }?.displayName
                 Toast.makeText(
@@ -458,26 +454,54 @@ class MainActivity : AppCompatActivity() {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 24, 48, 0)
         }
+
+        val presetsLabel = android.widget.TextView(this).apply {
+            text = "Quick picks (tap to fill in below, then Save & Refresh):"
+            setPadding(0, 0, 0, 12)
+        }
+        container.addView(presetsLabel)
+
         val input = EditText(this).apply {
             hint = "https://raw.githubusercontent.com/.../configs.txt"
             inputType = InputType.TYPE_TEXT_VARIATION_URI
             setText(repo.getSubscriptionUrl() ?: "")
         }
+
+        com.example.v2rayconfig.model.SubscriptionPresets.presets.forEach { preset ->
+            val btn = android.widget.Button(this).apply {
+                text = preset.name
+                setOnClickListener { input.setText(preset.url) }
+            }
+            container.addView(btn)
+        }
+
+        val divider = android.view.View(this).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 2
+            ).apply { topMargin = 16; bottomMargin = 16 }
+            setBackgroundColor(0xFFDDDDDD.toInt())
+        }
+        container.addView(divider)
+        container.addView(input)
+
         val autoConnectCheck = android.widget.CheckBox(this).apply {
             text = "Auto-connect to fastest reachable server on app open"
             isChecked = repo.isAutoConnectEnabled()
         }
-        container.addView(input)
         container.addView(autoConnectCheck)
+
+        val scroll = android.widget.ScrollView(this).apply { addView(container) }
 
         AlertDialog.Builder(this)
             .setTitle("Subscription source")
             .setMessage(
                 "Paste a raw text/GitHub link to a config list (one vmess/vless/ss link " +
-                    "per line, or base64 of that). Only add a source you trust — whoever " +
-                    "controls the servers in that list can see your proxied traffic."
+                    "per line, or base64 of that), or tap a quick pick below. Only use a " +
+                    "source you trust — whoever controls the servers in that list can see " +
+                    "your proxied traffic. The quick picks are public, widely-used " +
+                    "aggregators, not something we personally vouch for."
             )
-            .setView(container)
+            .setView(scroll)
             .setPositiveButton("Save & Refresh") { _, _ ->
                 val url = input.text.toString().trim()
                 repo.setAutoConnectEnabled(autoConnectCheck.isChecked)
