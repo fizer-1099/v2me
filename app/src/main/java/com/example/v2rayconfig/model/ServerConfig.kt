@@ -5,25 +5,20 @@ import org.json.JSONObject
 import java.net.URI
 import java.net.URLDecoder
 
-/**
- * A single saved server entry (vmess://, vless://, or ss:// link),
- * plus the raw Xray JSON config string it maps to.
- */
 data class ServerConfig(
     val id: String,
     val remark: String,
-    val protocol: String,      // "vmess", "vless", or "shadowsocks"
+    val protocol: String,
     val address: String,
     val port: Int,
-    val rawLink: String,       // original share link, kept for re-export/editing
-    val xrayConfigJson: String, // full outbound config Xray-core expects
-    val useFragment: Boolean = false, // TLS ClientHello fragmentation (helps against DPI)
-    val source: String = "manual" // "manual" or "subscription" — lets us refresh subscription entries without losing manual ones
+    val rawLink: String,
+    val xrayConfigJson: String,
+    val useFragment: Boolean = false,
+    val source: String = "manual"
 )
 
 object ConfigParser {
 
-    /** Parses a vmess://, vless://, or ss:// share link into a ServerConfig. */
     fun parse(link: String, useFragment: Boolean = false, localPort: Int = 10808): ServerConfig {
         val trimmed = link.trim()
         return when {
@@ -64,7 +59,6 @@ object ConfigParser {
     }
 
     private fun parseVless(link: String, useFragment: Boolean, localPort: Int = 10808): ServerConfig {
-        // vless://uuid@host:port?params#remark
         val uri = URI(link)
         val uuid = uri.userInfo
         val address = uri.host
@@ -78,20 +72,16 @@ object ConfigParser {
             }
 
         val network = query["type"] ?: "tcp"
-        // "security" can be: "", "tls", or "reality" — REALITY is the option
-        // that currently works best against active-probing DPI (e.g. in Iran)
-        // because it presents a real, unmodified TLS handshake of a genuine
-        // site (the "target"/dest) to any observer or prober.
         val security = query["security"] ?: ""
         val path = query["path"] ?: ""
         val host = query["host"] ?: ""
-        val flow = query["flow"] ?: ""          // e.g. "xtls-rprx-vision"
+        val flow = query["flow"] ?: ""
         val sni = query["sni"] ?: host
         val fingerprint = query["fp"] ?: "chrome"
-        val publicKey = query["pbk"] ?: ""       // REALITY public key
-        val shortId = query["sid"] ?: ""         // REALITY short id
-        val spiderX = query["spx"] ?: ""         // REALITY spiderX
-        val serviceName = query["serviceName"] ?: "" // for grpc
+        val publicKey = query["pbk"] ?: ""
+        val shortId = query["sid"] ?: ""
+        val spiderX = query["spx"] ?: ""
+        val serviceName = query["serviceName"] ?: ""
 
         val outbound = buildOutboundJson(
             protocol = "vless",
@@ -110,7 +100,6 @@ object ConfigParser {
     }
 
     private fun parseShadowsocks(link: String, useFragment: Boolean, localPort: Int = 10808): ServerConfig {
-        // ss://base64(method:password)@host:port#remark  OR fully base64'd after ss://
         var body = link.removePrefix("ss://")
         val hashIdx = body.indexOf('#')
         val remark = if (hashIdx >= 0) URLDecoder.decode(body.substring(hashIdx + 1), "UTF-8") else ""
@@ -123,7 +112,6 @@ object ConfigParser {
             methodPassRaw = body.substring(0, atIdx)
             hostPort = body.substring(atIdx + 1)
         } else {
-            // whole thing is base64: method:password@host:port
             val decodedAll = String(Base64.decode(body, Base64.URL_SAFE.or(Base64.NO_PADDING)))
             val at2 = decodedAll.lastIndexOf('@')
             methodPassRaw = decodedAll.substring(0, at2)
@@ -174,19 +162,6 @@ object ConfigParser {
         )
     }
 
-    /**
-     * Builds a minimal but complete Xray-core JSON config (inbound socks/http
-     * proxy on localhost + the outbound proxy) that Libv2ray can start directly.
-     *
-     * Anti-censorship notes:
-     * - security="reality" avoids a real TLS cert entirely; the server borrows
-     *   the TLS identity of a real site, so DPI sees a normal handshake.
-     * - flow="xtls-rprx-vision" (REALITY + vless) resists traffic-shape analysis.
-     * - useFragment=true splits the outgoing TLS ClientHello into small
-     *   fragments with delays, which helps against DPI that keys off the
-     *   size/shape of the first TLS packet — a technique widely used to get
-     *   through Iranian ISPs' filtering.
-     */
     private fun buildOutboundJson(
         protocol: String,
         address: String,
@@ -241,8 +216,6 @@ object ConfigParser {
                     put("serviceName", serviceName)
                 })
             }
-            // TCP Fast Open shaves a round-trip off every new connection to
-            // the proxy server — helps overall responsiveness/stability.
             put("sockopt", JSONObject().apply {
                 put("tcpFastOpen", true)
             })
@@ -272,11 +245,6 @@ object ConfigParser {
             put("settings", outboundSettings)
             put("streamSettings", streamSettings)
             put("tag", "proxy")
-            // Multiplexing reuses one proxy connection for many app requests,
-            // which noticeably improves stability/speed when lots of small
-            // connections open at once (e.g. loading a page with many assets).
-            // NOT compatible with XTLS flow control ("vision"), which needs
-            // to see each TCP connection's real framing — so skip mux there.
             if (flow != "xtls-rprx-vision") {
                 put("mux", JSONObject().apply {
                     put("enabled", true)
@@ -288,15 +256,10 @@ object ConfigParser {
         return buildRootConfig(outbound, useFragment, address, port, localPort)
     }
 
-    /** Assembles inbounds + the given proxy outbound (+ optional fragment chain) into a full config. */
     private fun buildRootConfig(proxyOutbound: JSONObject, useFragment: Boolean, address: String, port: Int, localPort: Int = 10808): String {
         val outbounds = org.json.JSONArray()
 
         if (useFragment) {
-            // Chain: proxy outbound dials out through a "fragment" freedom
-            // outbound, which splits the TLS ClientHello into small pieces
-            // with randomized timing. This targets DPI that fingerprints
-            // the first TLS packet shape rather than decrypting content.
             val streamSettings = proxyOutbound.getJSONObject("streamSettings")
             val sockopt = if (streamSettings.has("sockopt")) streamSettings.getJSONObject("sockopt") else JSONObject()
             sockopt.put("dialerProxy", "fragment-out")
@@ -328,12 +291,6 @@ object ConfigParser {
 
         val inbounds = org.json.JSONArray()
 
-        // TUN inbound: on Android, VpnService hands us a raw TUN file
-        // descriptor. AndroidLibXrayLite's CoreController.startLoop(config,
-        // tunFd) sets the xray.tun.fd env var for us; this inbound entry is
-        // what tells Xray-core to actually attach to that fd and read/write
-        // raw IP packets. (Verified against the current Xray-core
-        // proxy/tun README — "port"/"listen" are ignored for this inbound.)
         inbounds.put(JSONObject().apply {
             put("port", 0)
             put("protocol", "tun")
@@ -344,10 +301,6 @@ object ConfigParser {
             put("tag", "tun-in")
         })
 
-        // Secondary local SOCKS inbound — not used for system-wide routing
-        // (the tun inbound above handles that), but kept as a convenient
-        // local endpoint for this app's own diagnostics: the exit-country
-        // check and the periodic health-check both dial through it.
         inbounds.put(JSONObject().apply {
             put("port", localPort)
             put("listen", "127.0.0.1")
@@ -360,8 +313,6 @@ object ConfigParser {
             })
         })
 
-        // DNS over HTTPS to a resolver less likely to be poisoned/blocked,
-        // instead of relying on possibly-tampered local DNS.
         val dns = JSONObject().apply {
             put("servers", org.json.JSONArray().put("https://1.1.1.1/dns-query").put("8.8.8.8"))
         }
@@ -372,5 +323,23 @@ object ConfigParser {
             put("inbounds", inbounds)
             put("outbounds", outbounds)
         }.toString()
+    }
+
+    fun toTestConfigJson(config: ServerConfig): String {
+        return try {
+            val root = JSONObject(config.xrayConfigJson)
+            val originalInbounds = root.getJSONArray("inbounds")
+            val filtered = org.json.JSONArray()
+            for (i in 0 until originalInbounds.length()) {
+                val inbound = originalInbounds.getJSONObject(i)
+                if (inbound.optString("protocol") != "tun") {
+                    filtered.put(inbound)
+                }
+            }
+            root.put("inbounds", filtered)
+            root.toString()
+        } catch (e: Exception) {
+            config.xrayConfigJson
+        }
     }
 }
