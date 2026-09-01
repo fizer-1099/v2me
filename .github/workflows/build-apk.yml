@@ -21,6 +21,12 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Restore/cache debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
