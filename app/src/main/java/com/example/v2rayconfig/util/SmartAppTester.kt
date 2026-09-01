@@ -20,9 +20,10 @@ object SmartAppTester {
     private data class TestPair(val config: ServerConfig, val app: TargetApp)
 
     private fun measureOne(config: ServerConfig, url: String): Long {
+        val testJson = com.example.v2rayconfig.model.ConfigParser.toTestConfigJson(config)
         val future = nativeCallExecutor.submit<Long> {
             try {
-                Libv2ray.measureOutboundDelay(config.xrayConfigJson, url)
+                Libv2ray.measureOutboundDelay(testJson, url)
             } catch (e: Exception) {
                 -1L
             }
