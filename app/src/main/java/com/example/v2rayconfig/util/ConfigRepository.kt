@@ -5,7 +5,6 @@ import com.example.v2rayconfig.model.ServerConfig
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 
-/** Simple local persistence for saved server configs (no cloud sync). */
 class ConfigRepository(context: Context) {
 
     private val prefs = context.getSharedPreferences("v2ray_configs", Context.MODE_PRIVATE)
@@ -36,6 +35,20 @@ class ConfigRepository(context: Context) {
         save(all)
     }
 
+    fun clearAll() {
+        save(emptyList())
+        setActive(null)
+    }
+
+    fun update(oldId: String, newConfig: ServerConfig) {
+        val all = getAll()
+        val index = all.indexOfFirst { it.id == oldId }
+        if (index >= 0) {
+            all[index] = newConfig.copy(id = oldId, source = all[index].source)
+            save(all)
+        }
+    }
+
     fun setActive(id: String?) {
         prefs.edit().putString(KEY_ACTIVE, id).apply()
     }
@@ -54,16 +67,10 @@ class ConfigRepository(context: Context) {
         prefs.edit().putBoolean(KEY_AUTO_CONNECT, enabled).apply()
     }
 
-    /**
-     * Replaces all subscription-sourced configs with a fresh batch while
-     * keeping any manually-added ones untouched.
-     */
     fun replaceSubscriptionConfigs(newConfigs: List<ServerConfig>) {
         val manual = getAll().filter { it.source != "subscription" }
         save(manual + newConfigs)
     }
-
-    // ---------- Custom target apps (for Smart Test) ----------
 
     private val KEY_CUSTOM_APPS = "custom_target_apps"
     private val KEY_DISABLED_DEFAULT_APPS = "disabled_default_apps"
@@ -85,7 +92,6 @@ class ConfigRepository(context: Context) {
         prefs.edit().putString(KEY_CUSTOM_APPS, gson.toJson(all)).apply()
     }
 
-    /** Built-in target apps the user has chosen to hide (rather than deleting the catalog entry). */
     fun getDisabledDefaultAppIds(): Set<String> =
         prefs.getStringSet(KEY_DISABLED_DEFAULT_APPS, emptySet()) ?: emptySet()
 
@@ -95,14 +101,11 @@ class ConfigRepository(context: Context) {
         prefs.edit().putStringSet(KEY_DISABLED_DEFAULT_APPS, current).apply()
     }
 
-    /** The full active list: built-in defaults (minus hidden ones) + user-added custom ones. */
     fun getActiveTargetApps(): List<com.example.v2rayconfig.model.TargetApp> {
         val disabled = getDisabledDefaultAppIds()
         val defaults = com.example.v2rayconfig.model.TargetAppCatalog.defaults.filterNot { it.id in disabled }
         return defaults + getCustomTargetApps()
     }
-
-    // ---------- Failover cooldown tracking ----------
 
     private val KEY_FAILURE_TIMESTAMPS = "config_failure_timestamps"
 
@@ -112,14 +115,12 @@ class ConfigRepository(context: Context) {
         return gson.fromJson(json, type)
     }
 
-    /** Records that this config just failed, so failover logic avoids re-picking it for a while. */
     fun markConfigFailed(id: String) {
         val map = getFailureTimestamps()
         map[id] = System.currentTimeMillis()
         prefs.edit().putString(KEY_FAILURE_TIMESTAMPS, gson.toJson(map)).apply()
     }
 
-    /** Clears the failure record for a config (e.g. once it's confirmed healthy again). */
     fun clearConfigFailure(id: String) {
         val map = getFailureTimestamps()
         if (map.remove(id) != null) {
@@ -127,19 +128,15 @@ class ConfigRepository(context: Context) {
         }
     }
 
-    /** True if this config failed within the last [cooldownMs] and shouldn't be retried yet. */
     fun isInFailureCooldown(id: String, cooldownMs: Long): Boolean {
         val failedAt = getFailureTimestamps()[id] ?: return false
         return System.currentTimeMillis() - failedAt < cooldownMs
     }
 
-    // ---------- Smart Test results + failover priority app ----------
-
     private val KEY_SMART_TEST_RESULTS = "smart_test_results"
     private val KEY_SMART_TEST_TIMESTAMP = "smart_test_timestamp"
     private val KEY_PRIORITY_APP_ID = "priority_app_id"
 
-    /** configId -> (appId -> latencyMs). Persists the last Smart Test run so failover can use it later. */
     fun saveSmartTestResults(results: Map<String, Map<String, Long>>) {
         prefs.edit()
             .putString(KEY_SMART_TEST_RESULTS, gson.toJson(results))
@@ -155,7 +152,6 @@ class ConfigRepository(context: Context) {
 
     fun getSmartTestTimestamp(): Long = prefs.getLong(KEY_SMART_TEST_TIMESTAMP, 0L)
 
-    /** The app (e.g. "claude") the user wants failover to specifically optimize for, if any. */
     fun getPriorityAppId(): String? = prefs.getString(KEY_PRIORITY_APP_ID, null)
 
     fun setPriorityAppId(id: String?) {
