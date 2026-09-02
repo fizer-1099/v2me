@@ -34,7 +34,9 @@ class MainActivity : AppCompatActivity() {
     private var pendingConfig: ServerConfig? = null
     private var latencies: Map<String, Long> = emptyMap()
 
-    private val bgExecutor = Executors.newSingleThreadExecutor()
+    private val pingExecutor = Executors.newSingleThreadExecutor()
+    private val smartTestExecutor = Executors.newSingleThreadExecutor()
+    private val geoExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val vpnPermissionLauncher =
@@ -46,7 +48,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-    /** Fired by V2RayVpnService when it auto-switches to a different server (health-check failover). */
     private val activeConfigChangedReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
             val remark = intent?.getStringExtra(V2RayVpnService.EXTRA_NEW_CONFIG_REMARK)
@@ -86,13 +87,10 @@ class MainActivity : AppCompatActivity() {
         binding.buttonRefresh.setOnClickListener { runFullRefreshFlow(userInitiated = true) }
         binding.buttonSmartTest.setOnClickListener { runSmartAppTest() }
         binding.buttonManageApps.setOnClickListener { showManageTargetAppsDialog() }
+        binding.buttonClearAll.setOnClickListener { confirmClearAll() }
 
-        // On every app open: if a subscription URL is configured, fetch it,
-        // ping-test everything, and auto-connect to the best reachable one.
         runFullRefreshFlow(userInitiated = false)
     }
-
-    // ---------- Subscription + ping-test + auto-connect pipeline ----------
 
     private fun runFullRefreshFlow(userInitiated: Boolean) {
         val subUrl = repo.getSubscriptionUrl()
@@ -100,14 +98,13 @@ class MainActivity : AppCompatActivity() {
             if (userInitiated) {
                 Toast.makeText(this, "No subscription URL set yet. Tap 'Subscription' to add one.", Toast.LENGTH_LONG).show()
             }
-            // No subscription configured — still ping-test whatever configs exist locally.
             runPingAndAutoConnect(userInitiated)
             return
         }
 
         if (userInitiated) Toast.makeText(this, "Fetching subscription...", Toast.LENGTH_SHORT).show()
 
-        bgExecutor.submit {
+        pingExecutor.submit {
             try {
                 val fetched = SubscriptionManager.fetchAndParse(subUrl, useFragment = true)
                 repo.replaceSubscriptionConfigs(fetched)
@@ -118,7 +115,6 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 mainHandler.post {
                     Toast.makeText(this, "Subscription update failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    // Still test/connect with whatever configs we already have saved.
                     runPingAndAutoConnect(userInitiated)
                 }
             }
@@ -131,11 +127,17 @@ class MainActivity : AppCompatActivity() {
 
         if (userInitiated) Toast.makeText(this, "Testing ${all.size} server(s)...", Toast.LENGTH_SHORT).show()
 
-        bgExecutor.submit {
+        pingExecutor.submit {
             try {
                 val results = PingTester.testAll(this, all)
                 mainHandler.post {
                     latencies = results
+
+                    val sorted = all.sortedWith(
+                        compareBy { c -> results[c.id]?.takeIf { it >= 0 } ?: Long.MAX_VALUE }
+                    )
+                    repo.save(sorted)
+
                     refreshList()
 
                     val reachableCount = results.values.count { it >= 0 }
@@ -162,8 +164,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- Smart per-app testing ----------
-
     private fun runSmartAppTest() {
         val configs = repo.getAll()
         if (configs.isEmpty()) {
@@ -184,7 +184,7 @@ class MainActivity : AppCompatActivity() {
             .create()
         progressDialog.show()
 
-        bgExecutor.submit {
+        smartTestExecutor.submit {
             try {
                 val results = SmartAppTester.testAllConfigs(this, configs, apps) { done, total ->
                     mainHandler.post {
@@ -292,7 +292,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Lets the user add custom sites to test, and toggle/remove built-in ones. */
     private fun showManageTargetAppsDialog() {
         val container = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -397,8 +396,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------- List / config management ----------
-
     private fun refreshList() {
         val configs = repo.getAll()
         val activeId = repo.getActiveId()
@@ -411,10 +408,78 @@ class MainActivity : AppCompatActivity() {
                 repo.remove(config.id)
                 if (repo.getActiveId() == config.id) repo.setActive(null)
                 refreshList()
-            }
+            },
+            onEdit = { config -> showEditConfigDialog(config) },
+            onShare = { config -> shareConfig(config) }
         )
         binding.emptyState.visibility =
             if (configs.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
+    }
+
+    private fun showEditConfigDialog(existing: ServerConfig) {
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+        }
+        val input = EditText(this).apply {
+            hint = "Paste vmess://, vless://, or ss:// link"
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(existing.rawLink)
+        }
+        val fragmentCheck = android.widget.CheckBox(this).apply {
+            text = "Enable TLS fragmentation (helps against DPI, e.g. in Iran)"
+            isChecked = existing.useFragment
+        }
+        container.addView(input)
+        container.addView(fragmentCheck)
+
+        AlertDialog.Builder(this)
+            .setTitle("Edit Config")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                try {
+                    val updated = ConfigParser.parse(input.text.toString(), fragmentCheck.isChecked)
+                    repo.update(existing.id, updated)
+                    refreshList()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Invalid link: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun shareConfig(config: ServerConfig) {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, config.rawLink)
+            putExtra(Intent.EXTRA_SUBJECT, config.remark)
+        }
+        startActivity(Intent.createChooser(sendIntent, "Share config"))
+    }
+
+    private fun confirmClearAll() {
+        val count = repo.getAll().size
+        if (count == 0) {
+            Toast.makeText(this, "No configs to clear.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Clear all configs?")
+            .setMessage("This deletes all $count saved server(s), including manually-added ones. This can't be undone.")
+            .setPositiveButton("Delete all") { _, _ ->
+                startService(Intent(this, V2RayVpnService::class.java).apply {
+                    action = V2RayVpnService.ACTION_STOP
+                })
+                repo.clearAll()
+                latencies = emptyMap()
+                binding.textExitCountry.visibility = android.view.View.GONE
+                refreshList()
+                updateConnectionStatus()
+                Toast.makeText(this, "All configs deleted.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showAddConfigDialog() {
@@ -536,12 +601,11 @@ class MainActivity : AppCompatActivity() {
         checkExitCountryDelayed()
     }
 
-    /** Waits a moment for the tunnel to come up, then looks up the exit IP's country. */
     private fun checkExitCountryDelayed() {
         binding.textExitCountry.visibility = android.view.View.VISIBLE
         binding.textExitCountry.text = "Checking exit location..."
         mainHandler.postDelayed({
-            bgExecutor.submit {
+            geoExecutor.submit {
                 try {
                     val result = IpGeoChecker.check()
                     mainHandler.post {
@@ -566,7 +630,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        bgExecutor.shutdownNow()
+        pingExecutor.shutdownNow()
+        smartTestExecutor.shutdownNow()
+        geoExecutor.shutdownNow()
         super.onDestroy()
     }
 
