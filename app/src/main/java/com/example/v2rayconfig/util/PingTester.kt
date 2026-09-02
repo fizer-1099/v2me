@@ -17,10 +17,9 @@ object PingTester {
 
     fun testLatency(context: Context, config: ServerConfig, testUrl: String = DEFAULT_TEST_URL): Long {
         XrayEnv.ensureInitialized(context)
-        val testJson = com.example.v2rayconfig.model.ConfigParser.toTestConfigJson(config)
         val future = nativeCallExecutor.submit<Long> {
             try {
-                Libv2ray.measureOutboundDelay(testJson, testUrl)
+                Libv2ray.measureOutboundDelay(config.xrayConfigJson, testUrl)
             } catch (e: Exception) {
                 -1L
             }
