@@ -1,7 +1,6 @@
 package com.example.v2rayconfig.util
 
 import android.content.Context
-import com.example.v2rayconfig.model.ConfigParser
 import com.example.v2rayconfig.model.ServerConfig
 import com.example.v2rayconfig.model.TargetApp
 import libv2ray.Libv2ray
@@ -15,10 +14,9 @@ object SmartAppTester {
     private val nativeCallExecutor = Executors.newCachedThreadPool()
 
     private fun measureOne(config: ServerConfig, url: String): Long {
-        val testJson = ConfigParser.toTestConfigJson(config)
         val future = nativeCallExecutor.submit<Long> {
             try {
-                Libv2ray.measureOutboundDelay(testJson, url)
+                Libv2ray.measureOutboundDelay(config.xrayConfigJson, url)
             } catch (e: Exception) {
                 -1L
             }
