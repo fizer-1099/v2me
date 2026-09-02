@@ -13,7 +13,9 @@ class ConfigListAdapter(
     private val activeId: String?,
     private val latencies: Map<String, Long>,
     private val onClick: (ServerConfig) -> Unit,
-    private val onDelete: (ServerConfig) -> Unit
+    private val onDelete: (ServerConfig) -> Unit,
+    private val onEdit: (ServerConfig) -> Unit,
+    private val onShare: (ServerConfig) -> Unit
 ) : RecyclerView.Adapter<ConfigListAdapter.VH>() {
 
     class VH(view: View) : RecyclerView.ViewHolder(view) {
@@ -21,6 +23,8 @@ class ConfigListAdapter(
         val subtitle: TextView = view.findViewById(R.id.textAddress)
         val status: TextView = view.findViewById(R.id.textStatus)
         val deleteBtn: View = view.findViewById(R.id.buttonDelete)
+        val editBtn: View = view.findViewById(R.id.buttonEdit)
+        val shareBtn: View = view.findViewById(R.id.buttonShare)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -44,6 +48,8 @@ class ConfigListAdapter(
 
         holder.itemView.setOnClickListener { onClick(item) }
         holder.deleteBtn.setOnClickListener { onDelete(item) }
+        holder.editBtn.setOnClickListener { onEdit(item) }
+        holder.shareBtn.setOnClickListener { onShare(item) }
     }
 
     override fun getItemCount() = items.size
