@@ -34,6 +34,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingConfig: ServerConfig? = null
     private var latencies: Map<String, Long> = emptyMap()
 
+    @Volatile private var pingInProgress = false
+
     private val pingExecutor = Executors.newSingleThreadExecutor()
     private val smartTestExecutor = Executors.newSingleThreadExecutor()
     private val geoExecutor = Executors.newSingleThreadExecutor()
@@ -93,30 +95,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runFullRefreshFlow(userInitiated: Boolean) {
-        val subUrl = repo.getSubscriptionUrl()
-        if (subUrl.isNullOrBlank()) {
+        val subs = repo.getSubscriptions().filter { it.enabled }
+        if (subs.isEmpty()) {
             if (userInitiated) {
-                Toast.makeText(this, "No subscription URL set yet. Tap 'Subscription' to add one.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "No subscriptions added yet. Tap 'Subscription' to add one.", Toast.LENGTH_LONG).show()
             }
             runPingAndAutoConnect(userInitiated)
             return
         }
 
-        if (userInitiated) Toast.makeText(this, "Fetching subscription...", Toast.LENGTH_SHORT).show()
+        if (userInitiated) Toast.makeText(this, "Fetching ${subs.size} subscription(s)...", Toast.LENGTH_SHORT).show()
 
         pingExecutor.submit {
-            try {
-                val fetched = SubscriptionManager.fetchAndParse(subUrl, useFragment = true)
-                repo.replaceSubscriptionConfigs(fetched)
-                mainHandler.post {
-                    refreshList()
-                    runPingAndAutoConnect(userInitiated)
+            val allFetched = mutableListOf<ServerConfig>()
+            var anyFailed = false
+            for (sub in subs) {
+                try {
+                    allFetched.addAll(SubscriptionManager.fetchAndParseWithTimeout(sub.url, useFragment = true))
+                } catch (e: Exception) {
+                    anyFailed = true
                 }
-            } catch (e: Exception) {
-                mainHandler.post {
-                    Toast.makeText(this, "Subscription update failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    runPingAndAutoConnect(userInitiated)
+            }
+            repo.replaceSubscriptionConfigs(allFetched)
+            mainHandler.post {
+                refreshList()
+                if (anyFailed && userInitiated) {
+                    Toast.makeText(this, "One or more subscriptions failed to update.", Toast.LENGTH_LONG).show()
                 }
+                if (userInitiated && allFetched.size > 100) {
+                    Toast.makeText(
+                        this,
+                        "${allFetched.size} servers imported — Refresh+Ping and Smart Test will be slow with this many. Consider using fewer/smaller subscriptions.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                runPingAndAutoConnect(userInitiated)
             }
         }
     }
@@ -124,6 +137,14 @@ class MainActivity : AppCompatActivity() {
     private fun runPingAndAutoConnect(userInitiated: Boolean) {
         val all = repo.getAll()
         if (all.isEmpty()) return
+
+        if (pingInProgress) {
+            if (userInitiated) {
+                Toast.makeText(this, "A test is already running — please wait for it to finish.", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        pingInProgress = true
 
         if (userInitiated) Toast.makeText(this, "Testing ${all.size} server(s)...", Toast.LENGTH_SHORT).show()
 
@@ -160,13 +181,15 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this, "Ping test failed: ${e.message}", Toast.LENGTH_LONG).show()
                     }
                 }
+            } finally {
+                pingInProgress = false
             }
         }
     }
 
     private fun runSmartAppTest() {
-        val configs = repo.getAll()
-        if (configs.isEmpty()) {
+        val allConfigs = repo.getAll()
+        if (allConfigs.isEmpty()) {
             Toast.makeText(this, "Add at least one config first.", Toast.LENGTH_SHORT).show()
             return
         }
@@ -176,6 +199,29 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "No target apps configured. Tap 'Manage Apps' first.", Toast.LENGTH_LONG).show()
             return
         }
+
+        val limit = 40
+        if (allConfigs.size > limit) {
+            AlertDialog.Builder(this)
+                .setTitle("${allConfigs.size} servers is a lot")
+                .setMessage(
+                    "Testing all ${allConfigs.size} servers × ${apps.size} apps " +
+                        "(${allConfigs.size * apps.size} checks) could take a long time, even in parallel. " +
+                        "Test only the fastest $limit (by last ping result) instead, or continue with all of them?"
+                )
+                .setPositiveButton("Fastest $limit only") { _, _ ->
+                    startSmartAppTest(allConfigs.take(limit), apps)
+                }
+                .setNegativeButton("Test all ${allConfigs.size}") { _, _ ->
+                    startSmartAppTest(allConfigs, apps)
+                }
+                .show()
+        } else {
+            startSmartAppTest(allConfigs, apps)
+        }
+    }
+
+    private fun startSmartAppTest(configs: List<ServerConfig>, apps: List<com.example.v2rayconfig.model.TargetApp>) {
         val progressDialog = AlertDialog.Builder(this)
             .setTitle("Smart testing...")
             .setMessage("Starting...")
@@ -520,60 +566,174 @@ class MainActivity : AppCompatActivity() {
             setPadding(48, 24, 48, 0)
         }
 
-        val presetsLabel = android.widget.TextView(this).apply {
-            text = "Quick picks (tap to fill in below, then Save & Refresh):"
-            setPadding(0, 0, 0, 12)
+        val autoConnectCheck = android.widget.CheckBox(this).apply {
+            text = "Auto-connect to fastest reachable server on app open"
+            isChecked = repo.isAutoConnectEnabled()
+            setOnCheckedChangeListener { _, isChecked -> repo.setAutoConnectEnabled(isChecked) }
         }
-        container.addView(presetsLabel)
+        container.addView(autoConnectCheck)
 
-        val input = EditText(this).apply {
-            hint = "https://raw.githubusercontent.com/.../configs.txt"
-            inputType = InputType.TYPE_TEXT_VARIATION_URI
-            setText(repo.getSubscriptionUrl() ?: "")
+        val listLabel = android.widget.TextView(this).apply {
+            text = "Your subscriptions:"
+            setPadding(0, 24, 0, 8)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
+        container.addView(listLabel)
 
-        com.example.v2rayconfig.model.SubscriptionPresets.presets.forEach { preset ->
-            val btn = android.widget.Button(this).apply {
-                text = preset.name
-                setOnClickListener { input.setText(preset.url) }
+        val listContainer = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        container.addView(listContainer)
+
+        fun rebuildList() {
+            listContainer.removeAllViews()
+            val subs = repo.getSubscriptions()
+            if (subs.isEmpty()) {
+                listContainer.addView(android.widget.TextView(this@MainActivity).apply {
+                    text = "None yet — add one below."
+                    setTextColor(0xFF888888.toInt())
+                    setPadding(0, 8, 0, 8)
+                })
             }
-            container.addView(btn)
+            subs.forEach { sub ->
+                val row = android.widget.LinearLayout(this@MainActivity).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, 8, 0, 8)
+                }
+                val enableCheck = android.widget.CheckBox(this@MainActivity).apply {
+                    isChecked = sub.enabled
+                    setOnCheckedChangeListener { _, isChecked -> repo.setSubscriptionEnabled(sub.id, isChecked) }
+                }
+                val label = android.widget.TextView(this@MainActivity).apply {
+                    text = "${sub.name}\n${sub.url}"
+                    textSize = 13f
+                    layoutParams = android.widget.LinearLayout.LayoutParams(0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                val editBtn = android.widget.ImageButton(this@MainActivity).apply {
+                    setImageResource(android.R.drawable.ic_menu_edit)
+                    background = null
+                    setOnClickListener { showEditSubscriptionDialog(sub) { rebuildList() } }
+                }
+                val deleteBtn = android.widget.ImageButton(this@MainActivity).apply {
+                    setImageResource(android.R.drawable.ic_menu_delete)
+                    background = null
+                    setOnClickListener {
+                        repo.removeSubscription(sub.id)
+                        rebuildList()
+                    }
+                }
+                row.addView(enableCheck)
+                row.addView(label)
+                row.addView(editBtn)
+                row.addView(deleteBtn)
+                listContainer.addView(row)
+            }
         }
+        rebuildList()
 
-        val divider = android.view.View(this).apply {
+        val divider1 = android.view.View(this).apply {
             layoutParams = android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 2
             ).apply { topMargin = 16; bottomMargin = 16 }
             setBackgroundColor(0xFFDDDDDD.toInt())
         }
-        container.addView(divider)
-        container.addView(input)
+        container.addView(divider1)
 
-        val autoConnectCheck = android.widget.CheckBox(this).apply {
-            text = "Auto-connect to fastest reachable server on app open"
-            isChecked = repo.isAutoConnectEnabled()
+        val addLabel = android.widget.TextView(this).apply {
+            text = "Add a subscription:"
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 8)
         }
-        container.addView(autoConnectCheck)
+        container.addView(addLabel)
+
+        val presetsLabel = android.widget.TextView(this).apply {
+            text = "Quick picks (tap to fill in the fields below):"
+            setPadding(0, 0, 0, 8)
+            textSize = 13f
+        }
+        container.addView(presetsLabel)
+
+        val nameInput = EditText(this).apply { hint = "Name (e.g. My Sub)" }
+        val urlInput = EditText(this).apply {
+            hint = "https://raw.githubusercontent.com/.../configs.txt"
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+        }
+
+        com.example.v2rayconfig.model.SubscriptionPresets.presets.forEach { preset ->
+            val btn = android.widget.Button(this).apply {
+                text = preset.name
+                setOnClickListener {
+                    nameInput.setText(preset.name)
+                    urlInput.setText(preset.url)
+                }
+            }
+            container.addView(btn)
+        }
+
+        container.addView(nameInput)
+        container.addView(urlInput)
+
+        val addBtn = android.widget.Button(this).apply {
+            text = "Add subscription"
+            setOnClickListener {
+                val name = nameInput.text.toString().trim().ifBlank { "Subscription" }
+                val url = urlInput.text.toString().trim()
+                if (url.isBlank()) {
+                    Toast.makeText(this@MainActivity, "Enter a URL first.", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                repo.addSubscription(name, url)
+                nameInput.setText("")
+                urlInput.setText("")
+                rebuildList()
+            }
+        }
+        container.addView(addBtn)
+
+        val warning = android.widget.TextView(this).apply {
+            text = "Only add sources you trust — whoever controls the servers in a " +
+                "subscription can see your proxied traffic. Quick picks are public, " +
+                "widely-used aggregators, not something we personally vouch for."
+            setPadding(0, 16, 0, 0)
+            textSize = 12f
+            setTextColor(0xFF888888.toInt())
+        }
+        container.addView(warning)
 
         val scroll = android.widget.ScrollView(this).apply { addView(container) }
 
         AlertDialog.Builder(this)
-            .setTitle("Subscription source")
-            .setMessage(
-                "Paste a raw text/GitHub link to a config list (one vmess/vless/ss link " +
-                    "per line, or base64 of that), or tap a quick pick below. Only use a " +
-                    "source you trust — whoever controls the servers in that list can see " +
-                    "your proxied traffic. The quick picks are public, widely-used " +
-                    "aggregators, not something we personally vouch for."
-            )
+            .setTitle("Subscriptions")
             .setView(scroll)
-            .setPositiveButton("Save & Refresh") { _, _ ->
-                val url = input.text.toString().trim()
-                repo.setAutoConnectEnabled(autoConnectCheck.isChecked)
+            .setPositiveButton("Refresh now") { _, _ -> runFullRefreshFlow(userInitiated = true) }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showEditSubscriptionDialog(sub: com.example.v2rayconfig.model.Subscription, onDone: () -> Unit) {
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+        }
+        val nameInput = EditText(this).apply { setText(sub.name) }
+        val urlInput = EditText(this).apply {
+            setText(sub.url)
+            inputType = InputType.TYPE_TEXT_VARIATION_URI
+        }
+        container.addView(nameInput)
+        container.addView(urlInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("Edit subscription")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val name = nameInput.text.toString().trim().ifBlank { "Subscription" }
+                val url = urlInput.text.toString().trim()
                 if (url.isNotBlank()) {
-                    repo.setSubscriptionUrl(url)
-                    runFullRefreshFlow(userInitiated = true)
+                    repo.updateSubscription(sub.id, name, url)
                 }
+                onDone()
             }
             .setNegativeButton("Cancel", null)
             .show()
