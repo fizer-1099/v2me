@@ -4,14 +4,20 @@ import android.content.Context
 import com.example.v2rayconfig.model.ServerConfig
 import com.example.v2rayconfig.model.TargetApp
 import libv2ray.Libv2ray
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicInteger
 
 object SmartAppTester {
 
     private const val PER_TEST_TIMEOUT_SEC = 8L
+    private const val MAX_PARALLEL_TESTS = 10
+
     private val nativeCallExecutor = Executors.newCachedThreadPool()
+
+    private data class TestPair(val config: ServerConfig, val app: TargetApp)
 
     private fun measureOne(config: ServerConfig, url: String): Long {
         val future = nativeCallExecutor.submit<Long> {
@@ -31,11 +37,6 @@ object SmartAppTester {
         }
     }
 
-    fun testConfigAgainstApps(context: Context, config: ServerConfig, apps: List<TargetApp>): Map<String, Long> {
-        XrayEnv.ensureInitialized(context)
-        return apps.associate { app -> app.id to measureOne(config, app.testUrl) }
-    }
-
     fun testAllConfigs(
         context: Context,
         configs: List<ServerConfig>,
@@ -44,18 +45,30 @@ object SmartAppTester {
     ): Map<String, Map<String, Long>> {
         XrayEnv.ensureInitialized(context)
 
-        val total = configs.size * apps.size
-        var done = 0
-        val grouped = mutableMapOf<String, MutableMap<String, Long>>()
+        val allPairs = configs.flatMap { c -> apps.map { a -> TestPair(c, a) } }
+        val total = allPairs.size
+        if (total == 0) return emptyMap()
 
-        for (config in configs) {
-            val perApp = mutableMapOf<String, Long>()
-            for (app in apps) {
-                perApp[app.id] = measureOne(config, app.testUrl)
-                done++
-                onProgress(done, total)
+        val doneCount = AtomicInteger(0)
+        val resultsByPair = ConcurrentHashMap<TestPair, Long>()
+        val pool = Executors.newFixedThreadPool(MAX_PARALLEL_TESTS)
+
+        try {
+            val futures = allPairs.map { pair ->
+                pool.submit {
+                    resultsByPair[pair] = measureOne(pair.config, pair.app.testUrl)
+                    onProgress(doneCount.incrementAndGet(), total)
+                }
             }
-            grouped[config.id] = perApp
+            futures.forEach { it.get() }
+        } finally {
+            pool.shutdown()
+        }
+
+        val grouped = mutableMapOf<String, MutableMap<String, Long>>()
+        allPairs.forEach { pair ->
+            val latency = resultsByPair[pair] ?: -1L
+            grouped.getOrPut(pair.config.id) { mutableMapOf() }[pair.app.id] = latency
         }
         return grouped
     }
