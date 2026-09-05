@@ -38,12 +38,12 @@ object PingTester {
         if (configs.isEmpty()) return emptyMap()
         XrayEnv.ensureInitialized(context)
         val results = ConcurrentHashMap<String, Long>()
-        val pool = Executors.newFixedThreadPool(minOf(configs.size, 8))
+        val pool = Executors.newFixedThreadPool(minOf(configs.size, 10))
         try {
             val futures = configs.map { config ->
                 pool.submit { results[config.id] = testLatency(context, config, testUrl) }
             }
-            futures.forEach { it.get(PER_TEST_TIMEOUT_SEC + 5, TimeUnit.SECONDS) }
+            futures.forEach { it.get() }
         } catch (e: Exception) {
         } finally {
             pool.shutdown()
