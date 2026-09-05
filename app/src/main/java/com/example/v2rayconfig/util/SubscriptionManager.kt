@@ -5,27 +5,35 @@ import com.example.v2rayconfig.model.ConfigParser
 import com.example.v2rayconfig.model.ServerConfig
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
-/**
- * Fetches a "subscription" — a plain-text or base64-encoded list of
- * vmess://, vless://, ss:// links, one per line. This is the standard
- * format used by most public config lists on GitHub (raw.githubusercontent.com
- * links to a .txt file). The user supplies the URL themselves; this class
- * does not hardcode or auto-pick any specific GitHub repo, since the
- * trustworthiness of a given list is something the user must judge —
- * a malicious or compromised list could point you at a hostile proxy
- * server capable of seeing your traffic.
- */
 object SubscriptionManager {
 
     class SubscriptionException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+    private const val HARD_TIMEOUT_SEC = 15L
+    private val timeoutExecutor = Executors.newCachedThreadPool()
+
+    fun fetchAndParseWithTimeout(url: String, useFragment: Boolean): List<ServerConfig> {
+        val future = timeoutExecutor.submit<List<ServerConfig>> { fetchAndParse(url, useFragment) }
+        return try {
+            future.get(HARD_TIMEOUT_SEC, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true)
+            throw SubscriptionException("Timed out after ${HARD_TIMEOUT_SEC}s (server unreachable or too slow).")
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw (e.cause as? Exception) ?: SubscriptionException("Unknown fetch error: ${e.message}")
+        }
+    }
 
     fun fetchAndParse(url: String, useFragment: Boolean): List<ServerConfig> {
         val raw = fetchRaw(url)
         val decoded = try {
             String(Base64.decode(raw.trim(), Base64.DEFAULT))
         } catch (e: Exception) {
-            raw // list wasn't base64-encoded, treat as already-plain
+            raw
         }
 
         val configs = decoded.lines()
@@ -37,7 +45,7 @@ object SubscriptionManager {
                 try {
                     ConfigParser.parse(line, useFragment).copy(source = "subscription")
                 } catch (e: Exception) {
-                    null // skip malformed individual entries rather than failing the whole batch
+                    null
                 }
             }
 
