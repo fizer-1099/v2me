@@ -11,7 +11,6 @@ class ConfigRepository(context: Context) {
     private val gson = Gson()
     private val KEY_LIST = "configs"
     private val KEY_ACTIVE = "active_id"
-    private val KEY_SUB_URL = "subscription_url"
     private val KEY_AUTO_CONNECT = "auto_connect"
 
     fun getAll(): MutableList<ServerConfig> {
@@ -55,10 +54,44 @@ class ConfigRepository(context: Context) {
 
     fun getActiveId(): String? = prefs.getString(KEY_ACTIVE, null)
 
-    fun getSubscriptionUrl(): String? = prefs.getString(KEY_SUB_URL, null)
+    private val KEY_SUBSCRIPTIONS = "subscriptions_list"
 
-    fun setSubscriptionUrl(url: String) {
-        prefs.edit().putString(KEY_SUB_URL, url).apply()
+    fun getSubscriptions(): MutableList<com.example.v2rayconfig.model.Subscription> {
+        val json = prefs.getString(KEY_SUBSCRIPTIONS, null) ?: return mutableListOf()
+        val type = object : TypeToken<MutableList<com.example.v2rayconfig.model.Subscription>>() {}.type
+        return gson.fromJson(json, type)
+    }
+
+    private fun saveSubscriptions(list: List<com.example.v2rayconfig.model.Subscription>) {
+        prefs.edit().putString(KEY_SUBSCRIPTIONS, gson.toJson(list)).apply()
+    }
+
+    fun addSubscription(name: String, url: String) {
+        val all = getSubscriptions()
+        all.add(com.example.v2rayconfig.model.Subscription(java.util.UUID.randomUUID().toString(), name, url))
+        saveSubscriptions(all)
+    }
+
+    fun updateSubscription(id: String, name: String, url: String) {
+        val all = getSubscriptions()
+        val idx = all.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            all[idx] = all[idx].copy(name = name, url = url)
+            saveSubscriptions(all)
+        }
+    }
+
+    fun removeSubscription(id: String) {
+        saveSubscriptions(getSubscriptions().filterNot { it.id == id })
+    }
+
+    fun setSubscriptionEnabled(id: String, enabled: Boolean) {
+        val all = getSubscriptions()
+        val idx = all.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            all[idx] = all[idx].copy(enabled = enabled)
+            saveSubscriptions(all)
+        }
     }
 
     fun isAutoConnectEnabled(): Boolean = prefs.getBoolean(KEY_AUTO_CONNECT, true)
